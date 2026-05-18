@@ -319,7 +319,7 @@ inline void ConvPerChannel(
     int o_width_count=output_shape[2];
     int o_channel_count=output_shape[3];
 
-    for(int batch=0; batch<kernel_shape[0]; batch++){
+    for(int batch=0; batch<batch_number; batch++){
         int tile=0;
         int height_count=padded_input_shape[1];
         int width_count=padded_input_shape[2];
@@ -735,7 +735,7 @@ inline void DepthwiseConvPerChannel(
     int o_width_count=output_shape[2];
     int o_channel_count=output_shape[3];
 
-    for(int batch=0; batch<kernel_shape[0]; batch++){
+    for(int batch=0; batch<batch_number; batch++){
         int tile=0;
         int height_count=padded_input_shape[1];
         int width_count=padded_input_shape[2];
