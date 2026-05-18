@@ -137,16 +137,16 @@ inline void ConvPerChannel(
         padding_down=(pad_height)/2;
     }
     else {
-        padding_up=pad_height/2+1;
-        padding_down=pad_height/2;
+        padding_up=pad_height/2;
+        padding_down=pad_height/2+1;
     }
     if (((output_shape[2]*stride_w)+overlap_w-input_shape[2])%2==0){
         padding_left=pad_width/2;
         padding_right=pad_width/2;
     }
     else {
-        padding_left=pad_width/2+1;
-        padding_right=pad_width/2;
+        padding_left=pad_width/2;
+        padding_right=pad_width/2+1;
     }
 
     //SPAD Size (precalculated)
@@ -553,16 +553,16 @@ inline void DepthwiseConvPerChannel(
         padding_down=(pad_height)/2;
     }
     else {
-        padding_up=pad_height/2+1;
-        padding_down=pad_height/2;
+        padding_up=pad_height/2;
+        padding_down=pad_height/2+1;
     }
     if (((output_shape[2]*stride_w)+overlap_w-input_shape[2])%2==0){
         padding_left=pad_width/2;
         padding_right=pad_width/2;
     }
     else {
-        padding_left=pad_width/2+1;
-        padding_right=pad_width/2;
+        padding_left=pad_width/2;
+        padding_right=pad_width/2+1;
     }
     
     //SPAD Size (precalculated)
