@@ -1,17 +1,3 @@
-/* Copyright 2019 The TensorFlow Authors. All Rights Reserved.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-==============================================================================*/
 #ifndef TENSORFLOW_LITE_KERNELS_INTERNAL_REFERENCE_INTEGER_OPS_CONV_H_
 #define TENSORFLOW_LITE_KERNELS_INTERNAL_REFERENCE_INTEGER_OPS_CONV_H_
 
@@ -23,159 +9,103 @@ limitations under the License.
 #include "tensorflow/lite/kernels/internal/common.h"
 #include "tensorflow/lite/kernels/internal/types.h"
 
-#include <stdint.h>
+/*
+#define DMA_BASE 0x40000000UL //defined in vivado
 
-static inline void RawPutcD(char c) {
-  volatile uint32_t* const uart_tx =
-      reinterpret_cast<volatile uint32_t*>(0x40600000u + 0x04u);
-  volatile uint32_t* const uart_status =
-      reinterpret_cast<volatile uint32_t*>(0x40600000u + 0x08u);
+#define CH_OFFSET(n)   ((n) * 0x20)
+#define REG_SRC        0x00
+#define REG_DST        0x04
+#define REG_LEN        0x08
+#define REG_CTRL       0x0C
+#define REG_STATUS     0x10
+#define REG_SPAD_SEL   0x14
 
-  while ((*uart_status) & 0x08u) {
-  }
+// SPAD select encoding — must match top.sv and the DMA RTL
+#define SPAD_WEIGHTS   0b000
+#define SPAD_IFMAPS    0b001
+#define SPAD_BIAS      0b010
+#define SPAD_SCALE     0b011
+#define SPAD_SHIFT     0b100
 
-  *uart_tx = static_cast<uint32_t>(static_cast<uint8_t>(c));
-}
+#define CSR_BASE       0x4000_1000 
 
-static inline void RawNewlineD() {
-  RawPutcD('\r');
-  RawPutcD('\n');
-}
-
-static inline void RawPutHexNibbleD(uint32_t v) {
-  v &= 0xFu;
-  RawPutcD((v < 10u) ? static_cast<char>('0' + v)
-                    : static_cast<char>('A' + (v - 10u)));
-}
-
-static inline void RawPutHex32D(uint32_t v) {
-  for (int shift = 28; shift >= 0; shift -= 4) {
-    RawPutHexNibbleD(v >> shift);
-  }
-}
-
-static inline void RawTagHexD(char tag, uint32_t v) {
-  RawPutcD(tag);
-  RawPutHex32D(v);
-  RawPutcD(' ');
-}
-
-
+#define SPAD_W_BASE    0xC000_0000 //weight spad
+#define SPAD_I_BASE    0xC000_2000 //input spad
+#define SPAD_B_BASE    0xC000_4000 //bias spad
+#define SPAD_M_BASE    0xC000_6000 //mult spad
+#define SPAD_S_BASE    0xC000_8000 //shift spad
+#define SPAD_O_BASE    0x2000_0000 //output spad
+*/
 namespace tflite {
-namespace reference_integer_ops {
+namespace reference_ops {
+/*
+    #define DMA_REG(ch, reg) \
+        (*((volatile uint32_t *)(DMA_BASE + CH_OFFSET(ch) + (reg))))
 
-// Fixed-point per-channel-quantization convolution reference kernel.
-// inline void ConvPerChannel(
-//     const ConvParams& params, const int32_t* output_multiplier,
-//     const int32_t* output_shift, const RuntimeShape& input_shape,
-//     const int8_t* input_data, const RuntimeShape& filter_shape,
-//     const int8_t* filter_data, const RuntimeShape& bias_shape,
-//     const int32_t* bias_data, const RuntimeShape& output_shape,
-//     int8_t* output_data) {
-//   // Get parameters.
-//   const int32_t input_offset = params.input_offset;  // r = s(q - Z)
-//   const int stride_width = params.stride_width;
-//   const int stride_height = params.stride_height;
-//   const int dilation_width_factor = params.dilation_width_factor;
-//   const int dilation_height_factor = params.dilation_height_factor;
-//   const int pad_width = params.padding_values.width;
-//   const int pad_height = params.padding_values.height;
-//   const int32_t output_offset = params.output_offset;
+    #define DMA_STATUS(ch)  DMA_REG(ch, REG_STATUS)
+    #define DONE_BIT        (1 << 1)
 
-//   // Set min and max value of the output.
-//   const int32_t output_activation_min = params.quantized_activation_min;
-//   const int32_t output_activation_max = params.quantized_activation_max;
+    // Please follow the order of SRC, DST, LEN, SPAD SEL, and last should be CTRL
+    void dma_load_weights(uint32_t dram_src, uint32_t spad_dst, uint32_t len) {
+        DMA_REG(0, REG_SRC)      = dram_src;
+        DMA_REG(0, REG_DST)      = spad_dst;
+        DMA_REG(0, REG_LEN)      = len;
+        DMA_REG(0, REG_SPAD_SEL) = SPAD_WEIGHTS;  // 0b000
+        DMA_REG(0, REG_CTRL)     = 0x1;           // START — must be last
+        while (!(DMA_STATUS(0) & DONE_BIT));
+        DMA_STATUS(0) = DONE_BIT;                 // W1C clear
+    }
 
-//   // Consistency check.
-//   TFLITE_DCHECK_LE(output_activation_min, output_activation_max);
-//   TFLITE_DCHECK_EQ(input_shape.DimensionsCount(), 4);
-//   TFLITE_DCHECK_EQ(filter_shape.DimensionsCount(), 4);
-//   TFLITE_DCHECK_EQ(output_shape.DimensionsCount(), 4);
-//   const int batches = MatchingDim(input_shape, 0, output_shape, 0);
-//   const int input_depth = input_shape.Dims(3);
-//   const int output_depth = MatchingDim(filter_shape, 0, output_shape, 3);
-//   if (bias_data) {
-//     TFLITE_DCHECK_EQ(bias_shape.FlatSize(), output_depth);
-//   }
+    void dma_load_inputs(uint32_t dram_src, uint32_t spad_dst, uint32_t len) {
+        DMA_REG(1, REG_SRC)      = dram_src;
+        DMA_REG(1, REG_DST)      = spad_dst;
+        DMA_REG(1, REG_LEN)      = len;
+        DMA_REG(1, REG_SPAD_SEL) = SPAD_IFMAPS;   // 0b001
+        DMA_REG(1, REG_CTRL)     = 0x1;
+        while (!(DMA_STATUS(1) & DONE_BIT));
+        DMA_STATUS(1) = DONE_BIT;
+    }
 
-//   // Check dimensions of the tensors.
-//   const int input_height = input_shape.Dims(1);
-//   const int input_width = input_shape.Dims(2);
-//   const int filter_height = filter_shape.Dims(1);
-//   const int filter_width = filter_shape.Dims(2);
-//   const int filter_input_depth = filter_shape.Dims(3);
-//   const int groups = input_depth / filter_input_depth;
-//   TFLITE_DCHECK_NE(groups, 0);
-//   TFLITE_DCHECK_EQ(input_depth % filter_input_depth, 0);
-//   const int filters_per_group = output_depth / groups;
-//   TFLITE_DCHECK_NE(filters_per_group, 0);
-//   const int output_height = output_shape.Dims(1);
-//   const int output_width = output_shape.Dims(2);
-//   for (int batch = 0; batch < batches; ++batch) {
-//     for (int out_y = 0; out_y < output_height; ++out_y) {
-//       const int in_y_origin = (out_y * stride_height) - pad_height;
-//       for (int out_x = 0; out_x < output_width; ++out_x) {
-//         const int in_x_origin = (out_x * stride_width) - pad_width;
-//         for (int out_channel = 0; out_channel < output_depth; ++out_channel) {
-//           auto group = out_channel / filters_per_group;
-//           int32_t acc = 0;
-//           for (int filter_y = 0; filter_y < filter_height; ++filter_y) {
-//             const int in_y = in_y_origin + dilation_height_factor * filter_y;
-//             for (int filter_x = 0; filter_x < filter_width; ++filter_x) {
-//               const int in_x = in_x_origin + dilation_width_factor * filter_x;
+    void dma_load_bias(uint32_t dram_src, uint32_t spad_dst, uint32_t len) {
+        DMA_REG(2, REG_SRC)      = dram_src;
+        DMA_REG(2, REG_DST)      = spad_dst;
+        DMA_REG(2, REG_LEN)      = len;
+        DMA_REG(2, REG_SPAD_SEL) = SPAD_BIAS;     // 0b010
+        DMA_REG(2, REG_CTRL)     = 0x1;
+        while (!(DMA_STATUS(2) & DONE_BIT));
+        DMA_STATUS(2) = DONE_BIT;
+    }
 
-//               // Zero padding by omitting the areas outside the image.
-//               const bool is_point_inside_image =
-//                   (in_x >= 0) && (in_x < input_width) && (in_y >= 0) &&
-//                   (in_y < input_height);
+    void dma_load_scale(uint32_t dram_src, uint32_t spad_dst, uint32_t len) {
+        DMA_REG(3, REG_SRC)      = dram_src;
+        DMA_REG(3, REG_DST)      = spad_dst;
+        DMA_REG(3, REG_LEN)      = len;
+        DMA_REG(3, REG_SPAD_SEL) = SPAD_SCALE;  // 0b011
+        DMA_REG(3, REG_CTRL)     = 0x1;           
+        while (!(DMA_STATUS(3) & DONE_BIT));
+        DMA_STATUS(3) = DONE_BIT;                 
+    }
 
-//               if (!is_point_inside_image) {
-//                 continue;
-//               }
+    void dma_load_shift(uint32_t dram_src, uint32_t spad_dst, uint32_t len) {
+        DMA_REG(0, REG_SRC)      = dram_src;
+        DMA_REG(0, REG_DST)      = spad_dst;
+        DMA_REG(0, REG_LEN)      = len;
+        DMA_REG(0, REG_SPAD_SEL) = SPAD_SHIFT;   // 0b100
+        DMA_REG(0, REG_CTRL)     = 0x1;
+        while (!(DMA_STATUS(0) & DONE_BIT));
+        DMA_STATUS(0) = DONE_BIT;
+    }
 
-//               for (int in_channel = 0; in_channel < filter_input_depth;
-//                    ++in_channel) {
-//                 int32_t input_val =
-//                     input_data[Offset(input_shape, batch, in_y, in_x,
-//                                       in_channel + group * filter_input_depth)];
-//                 int32_t filter_val = filter_data[Offset(
-//                     filter_shape, out_channel, filter_y, filter_x, in_channel)];
-//                 // Accumulate with 32 bits accumulator.
-//                 // In the nudging process during model quantization, we force
-//                 // real value of 0.0 be represented by a quantized value. This
-//                 // guarantees that the input_offset is a int8_t, even though
-//                 // it is represented using int32_t. int32_t += int8_t *
-//                 // (int8_t - int8_t) so the highest value we can get from each
-//                 // accumulation is [-127, 127] * ([-128, 127] -
-//                 // [-128, 127]), which is [-32512, 32512]. log2(32512)
-//                 // = 14.98, which means we can accumulate at least 2^16
-//                 // multiplications without overflow. The accumulator is
-//                 // applied to a filter so the accumulation logic will hold as
-//                 // long as the filter size (filter_y * filter_x * in_channel)
-//                 // does not exceed 2^16, which is the case in all the models
-//                 // we have seen so far.
-//                 // TODO(b/174275578): Add a check to make sure the
-//                 // accumulator depth is smaller than 2^16.
-//                 acc += filter_val * (input_val + input_offset);
-//               }
-//             }
-//           }
-
-//           if (bias_data) {
-//             acc += bias_data[out_channel];
-//           }
-//           acc = MultiplyByQuantizedMultiplier(
-//               acc, output_multiplier[out_channel], output_shift[out_channel]);
-//           acc += output_offset;
-//           acc = std::max(acc, output_activation_min);
-//           acc = std::min(acc, output_activation_max);
-//           output_data[Offset(output_shape, batch, out_y, out_x, out_channel)] =
-//               static_cast<int8_t>(acc);
-//         }
-//       }
-//     }
-//   }
-// }
+    void dma_load_csr(uint32_t dram_src, uint32_t csr_dst, uint32_t len) {
+        DMA_REG(1, REG_SRC)      = dram_src;
+        DMA_REG(1, REG_DST)      = csr_dst;
+        DMA_REG(1, REG_LEN)      = len;
+        DMA_REG(1, REG_SPAD_SEL) = 0b000;
+        DMA_REG(1, REG_CTRL)     = 0x1;
+        while (!(DMA_STATUS(1) & DONE_BIT));
+        DMA_STATUS(1) = DONE_BIT;
+    }
+*/
 
 inline void ConvPerChannel(
     const ConvParams& params, const int32_t* output_mult,
@@ -202,24 +132,6 @@ inline void ConvPerChannel(
     const int kernel_shape[] = {w_shape.Dims(0), w_shape.Dims(1), w_shape.Dims(2), w_shape.Dims(3)};
     const int output_shape[] = {o_shape.Dims(0), o_shape.Dims(1), o_shape.Dims(2), o_shape.Dims(3)};
 
-    //SPAD Size (precalculated)
-    int plm_in=8192;
-    int plm_w=8192;
-    int plm_out=8192;
-
-    //Unknowns
-    int tile_shape[4]; //input tile
-    int w_tile_shape[4]; //weight tile
-    int o_tile_shape[4]; //output tile
-    int tile_number; //how many tiles there are
-    int height_number; //how many parts height is divided into
-    int width_number; //how many parts width is divided into
-    int channel_number; //how many parts channel is divided into
-    int batch_number; //how many batches
-    int systolic_size[]={8, 8};
-    int overlap_h=kernel_shape[1]-stride_h;
-    int overlap_w=kernel_shape[2]-stride_w;
-
     const int pad_height = (output_shape[1]*stride_h)+overlap_h-input_shape[1];
     const int pad_width = (output_shape[1]*stride_h)+overlap_h-input_shape[1];
 
@@ -243,6 +155,24 @@ inline void ConvPerChannel(
         padding_left=pad_width/2;
         padding_right=pad_width/2+1;
     }
+
+    //SPAD Size (precalculated)
+    int plm_in=8192;
+    int plm_w=8192;
+    int plm_out=8192;
+
+    //Unknowns
+    int tile_shape[4]; //input tile
+    int w_tile_shape[4]; //weight tile
+    int o_tile_shape[4]; //output tile
+    int tile_number; //how many tiles there are
+    int height_number; //how many parts height is divided into
+    int width_number; //how many parts width is divided into
+    int channel_number; //how many parts channel is divided into
+    int batch_number; //how many batches
+    int systolic_size[]={8, 8};
+    int overlap_h=kernel_shape[1]-stride_h;
+    int overlap_w=kernel_shape[2]-stride_w;
 
     int padded_input_shape[] = {input_shape[0], input_shape[1]+padding_up+padding_down, input_shape[2]+padding_left+padding_right, input_shape[3]};
 
@@ -430,8 +360,7 @@ inline void ConvPerChannel(
                         }
                     }
                 }
-            }
-            else{
+                else{
                 for(int height=0; height<kernel_shape[1]; height++){
                     for(int width=0; width<kernel_shape[2]; width++){
                         for(int channel=0; channel<w_tile_shape[3]; channel++){
@@ -440,7 +369,7 @@ inline void ConvPerChannel(
                     }
                 }
             }
-            
+            }
 
             //input tiling
             for(int height=0; height<std::min(tile_shape[1], height_count); height++){
@@ -451,6 +380,7 @@ inline void ConvPerChannel(
                         int height_off=0;
                         int width_off=0;
                         int channel_off=(real_tile/(tile_shape[1]*tile_shape[2]))*tile_shape[3];
+                        int pixel;
                         if(tile>=height_number){
                             height_off=(((tile)/height_number))*(tile_shape[1]-overlap_h);
                         }
@@ -655,107 +585,5 @@ inline void ConvPerChannel(
     }
 }
 
-
-// Fixed-point per-channel-quantization convolution reference kernel.
-// 16-bit data and 8-bit filter
-template <typename AccumScalar>
-inline void ConvPerChannel(
-    const ConvParams& params, const int32_t* output_multiplier,
-    const int32_t* output_shift, const RuntimeShape& input_shape,
-    const int16_t* input_data, const RuntimeShape& filter_shape,
-    const int8_t* filter_data, const RuntimeShape& bias_shape,
-    const AccumScalar* bias_data, const RuntimeShape& output_shape,
-    int16_t* output_data) {
-  // Get parameters.
-  const int stride_width = params.stride_width;
-  const int stride_height = params.stride_height;
-  const int dilation_width_factor = params.dilation_width_factor;
-  const int dilation_height_factor = params.dilation_height_factor;
-  const int pad_width = params.padding_values.width;
-  const int pad_height = params.padding_values.height;
-
-  // Set min and max value of the output.
-  const int32_t output_activation_min = params.quantized_activation_min;
-  const int32_t output_activation_max = params.quantized_activation_max;
-
-  // Consistency check.
-  TFLITE_DCHECK_LE(output_activation_min, output_activation_max);
-  TFLITE_DCHECK_EQ(input_shape.DimensionsCount(), 4);
-  TFLITE_DCHECK_EQ(filter_shape.DimensionsCount(), 4);
-  TFLITE_DCHECK_EQ(output_shape.DimensionsCount(), 4);
-  const int batches = MatchingDim(input_shape, 0, output_shape, 0);
-  const int input_depth = input_shape.Dims(3);
-  const int output_depth = MatchingDim(filter_shape, 0, output_shape, 3);
-  if (bias_data) {
-    TFLITE_DCHECK_EQ(bias_shape.FlatSize(), output_depth);
-  }
-
-  // Check dimensions of the tensors.
-  const int input_height = input_shape.Dims(1);
-  const int input_width = input_shape.Dims(2);
-  const int filter_height = filter_shape.Dims(1);
-  const int filter_width = filter_shape.Dims(2);
-  const int filter_input_depth = filter_shape.Dims(3);
-  const int groups = input_depth / filter_input_depth;
-  TFLITE_DCHECK_EQ(input_depth % filter_input_depth, 0);
-  const int filters_per_group = output_depth / groups;
-  const int output_height = output_shape.Dims(1);
-  const int output_width = output_shape.Dims(2);
-  for (int batch = 0; batch < batches; ++batch) {
-    for (int out_y = 0; out_y < output_height; ++out_y) {
-      const int in_y_origin = (out_y * stride_height) - pad_height;
-      for (int out_x = 0; out_x < output_width; ++out_x) {
-        const int in_x_origin = (out_x * stride_width) - pad_width;
-        for (int out_channel = 0; out_channel < output_depth; ++out_channel) {
-          auto group = out_channel / filters_per_group;
-          AccumScalar acc = 0;
-          for (int filter_y = 0; filter_y < filter_height; ++filter_y) {
-            const int in_y = in_y_origin + dilation_height_factor * filter_y;
-            for (int filter_x = 0; filter_x < filter_width; ++filter_x) {
-              const int in_x = in_x_origin + dilation_width_factor * filter_x;
-
-              // Zero padding by omitting the areas outside the image.
-              const bool is_point_inside_image =
-                  (in_x >= 0) && (in_x < input_width) && (in_y >= 0) &&
-                  (in_y < input_height);
-
-              if (!is_point_inside_image) {
-                continue;
-              }
-
-              for (int in_channel = 0; in_channel < filter_input_depth;
-                   ++in_channel) {
-                int32_t input_val =
-                    input_data[Offset(input_shape, batch, in_y, in_x,
-                                      in_channel + group * filter_input_depth)];
-                int32_t filter_val = filter_data[Offset(
-                    filter_shape, out_channel, filter_y, filter_x, in_channel)];
-                // Accumulate with 64 bits accumulator.
-                // int64_t += int8_t * int16_t so the highest value we can
-                // get from each accumulation is [-127, 127] * ([-32768,
-                // 32767] -
-                // [-32768, 32767]), which is [-8322945, 8322945].
-                // log2(8322945) = 22.99.
-                acc += filter_val * input_val;
-              }
-            }
-          }
-          if (bias_data) {
-            acc += bias_data[out_channel];
-          }
-          int32_t scaled_acc = MultiplyByQuantizedMultiplier(
-              acc, output_multiplier[out_channel], output_shift[out_channel]);
-          scaled_acc = std::max(scaled_acc, output_activation_min);
-          scaled_acc = std::min(scaled_acc, output_activation_max);
-          output_data[Offset(output_shape, batch, out_y, out_x, out_channel)] =
-              static_cast<int16_t>(scaled_acc);
-        }
-      }
-    }
-  }
 }
-
-}  // namespace reference_integer_ops
-}  // namespace tflite
-
-#endif  // TENSORFLOW_LITE_KERNELS_INTERNAL_REFERENCE_INTEGER_OPS_CONV_H_
+}

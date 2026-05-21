@@ -1,5 +1,19 @@
-#ifndef TENSORFLOW_LITE_KERNELS_INTERNAL_REFERENCE_INTEGER_OPS_CONV_H_
-#define TENSORFLOW_LITE_KERNELS_INTERNAL_REFERENCE_INTEGER_OPS_CONV_H_
+/* Copyright 2019 The TensorFlow Authors. All Rights Reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+#ifndef TENSORFLOW_LITE_KERNELS_INTERNAL_REFERENCE_INTEGER_OPS_DEPTHWISE_CONV_H_
+#define TENSORFLOW_LITE_KERNELS_INTERNAL_REFERENCE_INTEGER_OPS_DEPTHWISE_CONV_H_
 
 #include <cstdint>
 #include <iostream>
@@ -9,103 +23,620 @@
 #include "tensorflow/lite/kernels/internal/common.h"
 #include "tensorflow/lite/kernels/internal/types.h"
 
-/*
-#define DMA_BASE 0x40000000UL //defined in vivado
+#include <stdint.h>
 
-#define CH_OFFSET(n)   ((n) * 0x20)
-#define REG_SRC        0x00
-#define REG_DST        0x04
-#define REG_LEN        0x08
-#define REG_CTRL       0x0C
-#define REG_STATUS     0x10
-#define REG_SPAD_SEL   0x14
+static inline void RawPutcD(char c) {
+  volatile uint32_t* const uart_tx =
+      reinterpret_cast<volatile uint32_t*>(0x40600000u + 0x04u);
+  volatile uint32_t* const uart_status =
+      reinterpret_cast<volatile uint32_t*>(0x40600000u + 0x08u);
 
-// SPAD select encoding — must match top.sv and the DMA RTL
-#define SPAD_WEIGHTS   0b000
-#define SPAD_IFMAPS    0b001
-#define SPAD_BIAS      0b010
-#define SPAD_SCALE     0b011
-#define SPAD_SHIFT     0b100
+  while ((*uart_status) & 0x08u) {
+  }
 
-#define CSR_BASE       0x4000_1000 
+  *uart_tx = static_cast<uint32_t>(static_cast<uint8_t>(c));
+}
 
-#define SPAD_W_BASE    0xC000_0000 //weight spad
-#define SPAD_I_BASE    0xC000_2000 //input spad
-#define SPAD_B_BASE    0xC000_4000 //bias spad
-#define SPAD_M_BASE    0xC000_6000 //mult spad
-#define SPAD_S_BASE    0xC000_8000 //shift spad
-#define SPAD_O_BASE    0x2000_0000 //output spad
-*/
+static inline void RawNewlineD() {
+  RawPutcD('\r');
+  RawPutcD('\n');
+}
+
+static inline void RawPutHexNibbleD(uint32_t v) {
+  v &= 0xFu;
+  RawPutcD((v < 10u) ? static_cast<char>('0' + v)
+                    : static_cast<char>('A' + (v - 10u)));
+}
+
+static inline void RawPutHex32D(uint32_t v) {
+  for (int shift = 28; shift >= 0; shift -= 4) {
+    RawPutHexNibbleD(v >> shift);
+  }
+}
+
+static inline void RawTagHexD(char tag, uint32_t v) {
+  RawPutcD(tag);
+  RawPutHex32D(v);
+  RawPutcD(' ');
+}
+
+
 namespace tflite {
-namespace reference_ops {
-/*      // Macro to write any DMA register
-    #define DMA_REG(ch, reg) \
-        (*((volatile uint32_t *)(DMA_BASE + CH_OFFSET(ch) + (reg))))
+namespace reference_integer_ops {
+// inline void DepthwiseConvPerChannel(
+//     const DepthwiseParams& params, const int32_t* output_multiplier,
+//     const int32_t* output_shift, const RuntimeShape& input_shape,
+//     const int8_t* input_data, const RuntimeShape& filter_shape,
+//     const int8_t* filter_data, const RuntimeShape& bias_shape,
+//     const int32_t* bias_data, const RuntimeShape& output_shape,
+//     int8_t* output_data) {
+//   // Get parameters.
+//   // TODO(b/141565753): Re-introduce ScopedProfilingLabel on Micro.
+//   const int stride_width = params.stride_width;
+//   const int stride_height = params.stride_height;
+//   const int dilation_width_factor = params.dilation_width_factor;
+//   const int dilation_height_factor = params.dilation_height_factor;
+//   const int pad_width = params.padding_values.width;
+//   const int pad_height = params.padding_values.height;
+//   const int depth_multiplier = params.depth_multiplier;
+//   const int32_t input_offset = params.input_offset;
+//   const int32_t output_offset = params.output_offset;
+//   const int32_t output_activation_min = params.quantized_activation_min;
+//   const int32_t output_activation_max = params.quantized_activation_max;
 
-    #define DMA_STATUS(ch)  DMA_REG(ch, REG_STATUS)
-    #define DONE_BIT        (1 << 1)
+//   // Check dimensions of the tensors.
+//   TFLITE_DCHECK_EQ(input_shape.DimensionsCount(), 4);
+//   TFLITE_DCHECK_EQ(filter_shape.DimensionsCount(), 4);
+//   TFLITE_DCHECK_EQ(output_shape.DimensionsCount(), 4);
 
-    // Please follow the order of SRC, DST, LEN, SPAD SEL, and last should be CTRL
-    void dma_load_weights(uint32_t dram_src, uint32_t spad_dst, uint32_t len) {
-        DMA_REG(0, REG_SRC)      = dram_src;
-        DMA_REG(0, REG_DST)      = spad_dst;
-        DMA_REG(0, REG_LEN)      = len;
-        DMA_REG(0, REG_SPAD_SEL) = SPAD_WEIGHTS;  // 0b000
-        DMA_REG(0, REG_CTRL)     = 0x1;           // START — must be last
-        while (!(DMA_STATUS(0) & DONE_BIT));
-        DMA_STATUS(0) = DONE_BIT;                 // W1C clear
-    }
+//   TFLITE_DCHECK_LE(output_activation_min, output_activation_max);
+//   const int batches = MatchingDim(input_shape, 0, output_shape, 0);
+//   const int output_depth = MatchingDim(filter_shape, 3, output_shape, 3);
+//   const int input_height = input_shape.Dims(1);
+//   const int input_width = input_shape.Dims(2);
+//   const int input_depth = input_shape.Dims(3);
+//   // const int input_height = input_shape.Dims(1);
+//   // volatile int input_width_v = input_shape.Dims(2);
+//   // const int input_width = input_width_v;
+//   // const int input_depth = input_shape.Dims(3);
+//   const int filter_height = filter_shape.Dims(1);
+//   const int filter_width = filter_shape.Dims(2);
+//   const int output_height = output_shape.Dims(1);
+//   const int output_width = output_shape.Dims(2);
+//   TFLITE_DCHECK_EQ(output_depth, input_shape.Dims(3) * depth_multiplier);
+//   TFLITE_DCHECK_EQ(bias_shape.FlatSize(), output_depth);
+//   RawPutcD('['); RawPutcD('D'); RawPutcD('W'); RawPutcD('S'); RawPutcD(']');
+//   RawTagHexD('b', static_cast<uint32_t>(batches));
+//   RawTagHexD('h', static_cast<uint32_t>(input_height));
+//   RawTagHexD('w', static_cast<uint32_t>(input_width));
+//   RawTagHexD('W', static_cast<uint32_t>(input_shape.Dims(2)));
+//   RawTagHexD('c', static_cast<uint32_t>(input_depth));
+//   RawTagHexD('H', static_cast<uint32_t>(output_height));
+//   RawTagHexD('W', static_cast<uint32_t>(output_width));
+//   RawTagHexD('C', static_cast<uint32_t>(output_depth));
+//   RawTagHexD('o', static_cast<uint32_t>(
+//                      reinterpret_cast<uintptr_t>(output_data)));
+//   RawNewlineD();
+//   RawPutcD('['); RawPutcD('D'); RawPutcD('S'); RawPutcD('I'); RawPutcD(']');
+//   RawTagHexD('0', static_cast<uint32_t>(input_shape.Dims(0)));
+//   RawTagHexD('1', static_cast<uint32_t>(input_shape.Dims(1)));
+//   RawTagHexD('2', static_cast<uint32_t>(input_shape.Dims(2)));
+//   RawTagHexD('3', static_cast<uint32_t>(input_shape.Dims(3)));
+//   RawNewlineD();
 
-    void dma_load_inputs(uint32_t dram_src, uint32_t spad_dst, uint32_t len) {
-        DMA_REG(1, REG_SRC)      = dram_src;
-        DMA_REG(1, REG_DST)      = spad_dst;
-        DMA_REG(1, REG_LEN)      = len;
-        DMA_REG(1, REG_SPAD_SEL) = SPAD_IFMAPS;   // 0b001
-        DMA_REG(1, REG_CTRL)     = 0x1;
-        while (!(DMA_STATUS(1) & DONE_BIT));
-        DMA_STATUS(1) = DONE_BIT;
-    }
+//   RawPutcD('['); RawPutcD('D'); RawPutcD('S'); RawPutcD('O'); RawPutcD(']');
+//   RawTagHexD('0', static_cast<uint32_t>(output_shape.Dims(0)));
+//   RawTagHexD('1', static_cast<uint32_t>(output_shape.Dims(1)));
+//   RawTagHexD('2', static_cast<uint32_t>(output_shape.Dims(2)));
+//   RawTagHexD('3', static_cast<uint32_t>(output_shape.Dims(3)));
+//   RawNewlineD();
 
-    void dma_load_bias(uint32_t dram_src, uint32_t spad_dst, uint32_t len) {
-        DMA_REG(2, REG_SRC)      = dram_src;
-        DMA_REG(2, REG_DST)      = spad_dst;
-        DMA_REG(2, REG_LEN)      = len;
-        DMA_REG(2, REG_SPAD_SEL) = SPAD_BIAS;     // 0b010
-        DMA_REG(2, REG_CTRL)     = 0x1;
-        while (!(DMA_STATUS(2) & DONE_BIT));
-        DMA_STATUS(2) = DONE_BIT;
-    }
+//   RawPutcD('['); RawPutcD('D'); RawPutcD('S'); RawPutcD('F'); RawPutcD(']');
+//   RawTagHexD('0', static_cast<uint32_t>(filter_shape.Dims(0)));
+//   RawTagHexD('1', static_cast<uint32_t>(filter_shape.Dims(1)));
+//   RawTagHexD('2', static_cast<uint32_t>(filter_shape.Dims(2)));
+//   RawTagHexD('3', static_cast<uint32_t>(filter_shape.Dims(3)));
+//   RawNewlineD();
+//   for (int batch = 0; batch < batches; ++batch) {
+//     for (int out_y = 0; out_y < output_height; ++out_y) {
+//       for (int out_x = 0; out_x < output_width; ++out_x) {
+//         for (int in_channel = 0; in_channel < input_depth; ++in_channel) {
+//           for (int m = 0; m < depth_multiplier; ++m) {
+//             const int output_channel = m + in_channel * depth_multiplier;
+//             const int in_x_origin = (out_x * stride_width) - pad_width;
+//             const int in_y_origin = (out_y * stride_height) - pad_height;
+//             int32_t acc = 0;
+//             for (int filter_y = 0; filter_y < filter_height; ++filter_y) {
+//               for (int filter_x = 0; filter_x < filter_width; ++filter_x) {
+//                 const int in_x = in_x_origin + dilation_width_factor * filter_x;
+//                 const int in_y =
+//                     in_y_origin + dilation_height_factor * filter_y;
+//                 // Zero padding by omitting the areas outside the image.
+//                 const bool is_point_inside_image =
+//                     (in_x >= 0) && (in_x < input_shape.Dims(2)) && (in_y >= 0) &&
+//                     (in_y < input_height);
+//                 if (is_point_inside_image) {
+//                   int32_t input_val = input_data[Offset(
+//                       input_shape, batch, in_y, in_x, in_channel)];
+//                   int32_t filter_val = filter_data[Offset(
+//                       filter_shape, 0, filter_y, filter_x, output_channel)];
+//                   // Accumulate with 32 bits accumulator.
+//                   // In the nudging process during model quantization, we force
+//                   // real value of 0.0 be represented by a quantized value. This
+//                   // guarantees that the input_offset is a int8_t, even though
+//                   // it is represented using int32_t. int32_t += int8_t *
+//                   // (int8_t - int8_t) so the highest value we can get from each
+//                   // accumulation is [-127, 127] * ([-128, 127] -
+//                   // [-128, 127]), which is [-32512, 32512]. log2(32512)
+//                   // = 14.98, which means we can accumulate at least 2^16
+//                   // multiplications without overflow. The accumulator is
+//                   // applied to a filter so the accumulation logic will hold as
+//                   // long as the filter size (filter_y * filter_x * in_channel)
+//                   // does not exceed 2^16, which is the case in all the models
+//                   // we have seen so far.
+//                   // TODO(b/174275578): Add a check to make sure the
+//                   // accumulator depth is smaller than 2^16.
+//                   acc += filter_val * (input_val + input_offset);
+//                 }
+//               }
+//             }
+//             if (bias_data) {
+//               acc += bias_data[output_channel];
+//             }
+//             acc = MultiplyByQuantizedMultiplier(
+//                 acc, output_multiplier[output_channel],
+//                 output_shift[output_channel]);
+//             acc += output_offset;
+//             acc = std::max(acc, output_activation_min);
+//             acc = std::min(acc, output_activation_max);
+//                         const int out_offset =
+//                 Offset(output_shape, batch, out_y, out_x, output_channel);
 
-    void dma_load_scale(uint32_t dram_src, uint32_t spad_dst, uint32_t len) {
-        DMA_REG(3, REG_SRC)      = dram_src;
-        DMA_REG(3, REG_DST)      = spad_dst;
-        DMA_REG(3, REG_LEN)      = len;
-        DMA_REG(3, REG_SPAD_SEL) = SPAD_SCALE;  // 0b011
-        DMA_REG(3, REG_CTRL)     = 0x1;           
-        while (!(DMA_STATUS(3) & DONE_BIT));
-        DMA_STATUS(3) = DONE_BIT;                 
-    }
+//             if (batch == 0 && out_y == 0 && out_x == 0 &&
+//                 in_channel == 0 && m == 0) {
+//               RawPutcD('['); RawPutcD('D'); RawPutcD('W'); RawPutcD('W'); RawPutcD(']');
+//               RawTagHexD('a', static_cast<uint32_t>(acc));
+//               RawTagHexD('p', static_cast<uint32_t>(
+//                               reinterpret_cast<uintptr_t>(&output_data[out_offset])));
+//               RawNewlineD();
+//             }
 
-    void dma_load_shift(uint32_t dram_src, uint32_t spad_dst, uint32_t len) {
-        DMA_REG(0, REG_SRC)      = dram_src;
-        DMA_REG(0, REG_DST)      = spad_dst;
-        DMA_REG(0, REG_LEN)      = len;
-        DMA_REG(0, REG_SPAD_SEL) = SPAD_SHIFT;   // 0b100
-        DMA_REG(0, REG_CTRL)     = 0x1;
-        while (!(DMA_STATUS(0) & DONE_BIT));
-        DMA_STATUS(0) = DONE_BIT;
-    }
+//             output_data[out_offset] = static_cast<int8_t>(acc);
+//             // output_data[Offset(output_shape, batch, out_y, out_x,
+//             //                    output_channel)] = static_cast<int8_t>(acc);
+//           }
+//         }
+//       }
+//     }
+//   }
+// }
 
-    void dma_load_csr(uint32_t dram_src, uint32_t csr_dst, uint32_t len) {
-        DMA_REG(1, REG_SRC)      = dram_src;
-        DMA_REG(1, REG_DST)      = csr_dst;
-        DMA_REG(1, REG_LEN)      = len;
-        DMA_REG(1, REG_SPAD_SEL) = 0b000;
-        DMA_REG(1, REG_CTRL)     = 0x1;
-        while (!(DMA_STATUS(1) & DONE_BIT));
-        DMA_STATUS(1) = DONE_BIT;
-    }
-    */
+// inline void DepthwiseConvPerChannel(
+//     const DepthwiseParams& params, const int32_t* output_multiplier,
+//     const int32_t* output_shift, const RuntimeShape& input_shape,
+//     const int8_t* input_data, const RuntimeShape& filter_shape,
+//     const int8_t* filter_data, const RuntimeShape& bias_shape,
+//     const int32_t* bias_data, const RuntimeShape& output_shape,
+//     int8_t* output_data) {
+//   // Get parameters.
+//   // TODO(b/141565753): Re-introduce ScopedProfilingLabel on Micro.
+//   const int stride_width = params.stride_width;
+//   const int stride_height = params.stride_height;
+//   const int dilation_width_factor = params.dilation_width_factor;
+//   const int dilation_height_factor = params.dilation_height_factor;
+//   const int pad_width = params.padding_values.width;
+//   const int pad_height = params.padding_values.height;
+//   const int depth_multiplier = params.depth_multiplier;
+//   const int32_t input_offset = params.input_offset;
+//   const int32_t output_offset = params.output_offset;
+//   const int32_t output_activation_min = params.quantized_activation_min;
+//   const int32_t output_activation_max = params.quantized_activation_max;
+
+//   // Check dimensions of the tensors.
+//   TFLITE_DCHECK_EQ(input_shape.DimensionsCount(), 4);
+//   TFLITE_DCHECK_EQ(filter_shape.DimensionsCount(), 4);
+//   TFLITE_DCHECK_EQ(output_shape.DimensionsCount(), 4);
+
+//   TFLITE_DCHECK_LE(output_activation_min, output_activation_max);
+//   const int batches = MatchingDim(input_shape, 0, output_shape, 0);
+//   const int output_depth = MatchingDim(filter_shape, 3, output_shape, 3);
+//   const int input_height = input_shape.Dims(1);
+//   const int input_width = input_shape.Dims(2);
+//   const int input_depth = input_shape.Dims(3);
+//   const int filter_height = filter_shape.Dims(1);
+//   const int filter_width = filter_shape.Dims(2);
+//   const int output_height = output_shape.Dims(1);
+//   const int output_width = output_shape.Dims(2);
+//   TFLITE_DCHECK_EQ(output_depth, input_shape.Dims(3) * depth_multiplier);
+//   TFLITE_DCHECK_EQ(bias_shape.FlatSize(), output_depth);
+
+//   // RawPutcD('['); RawPutcD('D'); RawPutcD('W'); RawPutcD('S'); RawPutcD(']');
+//   // RawTagHexD('b', static_cast<uint32_t>(batches));
+//   // RawTagHexD('h', static_cast<uint32_t>(input_height));
+//   // RawTagHexD('w', static_cast<uint32_t>(input_width));
+//   // RawTagHexD('c', static_cast<uint32_t>(input_depth));
+//   // RawTagHexD('f', static_cast<uint32_t>(filter_height));
+//   // RawTagHexD('g', static_cast<uint32_t>(filter_width));
+//   // RawTagHexD('H', static_cast<uint32_t>(output_height));
+//   // RawTagHexD('W', static_cast<uint32_t>(output_width));
+//   // RawTagHexD('C', static_cast<uint32_t>(output_depth));
+//   // RawTagHexD('o', static_cast<uint32_t>(
+//   //                    reinterpret_cast<uintptr_t>(output_data)));
+//   // RawNewlineD();
+
+//   // RawPutcD('['); RawPutcD('D'); RawPutcD('S'); RawPutcD('I'); RawPutcD(']');
+//   // RawTagHexD('0', static_cast<uint32_t>(input_shape.Dims(0)));
+//   // RawTagHexD('1', static_cast<uint32_t>(input_shape.Dims(1)));
+//   // RawTagHexD('2', static_cast<uint32_t>(input_shape.Dims(2)));
+//   // RawTagHexD('3', static_cast<uint32_t>(input_shape.Dims(3)));
+//   // RawNewlineD();
+
+//   // RawPutcD('['); RawPutcD('D'); RawPutcD('S'); RawPutcD('O'); RawPutcD(']');
+//   // RawTagHexD('0', static_cast<uint32_t>(output_shape.Dims(0)));
+//   // RawTagHexD('1', static_cast<uint32_t>(output_shape.Dims(1)));
+//   // RawTagHexD('2', static_cast<uint32_t>(output_shape.Dims(2)));
+//   // RawTagHexD('3', static_cast<uint32_t>(output_shape.Dims(3)));
+//   // RawNewlineD();
+
+//   // RawPutcD('['); RawPutcD('D'); RawPutcD('S'); RawPutcD('F'); RawPutcD(']');
+//   // RawTagHexD('0', static_cast<uint32_t>(filter_shape.Dims(0)));
+//   // RawTagHexD('1', static_cast<uint32_t>(filter_shape.Dims(1)));
+//   // RawTagHexD('2', static_cast<uint32_t>(filter_shape.Dims(2)));
+//   // RawTagHexD('3', static_cast<uint32_t>(filter_shape.Dims(3)));
+//   // RawNewlineD();
+
+//   for (int batch = 0; batch < MatchingDim(input_shape, 0, output_shape, 0);
+//        ++batch) {
+//     for (int out_y = 0; out_y < output_shape.Dims(1); ++out_y) {
+//       for (int out_x = 0; out_x < output_shape.Dims(2); ++out_x) {
+//         for (int in_channel = 0; in_channel < input_shape.Dims(3);
+//              ++in_channel) {
+//           for (int m = 0; m < depth_multiplier; ++m) {
+//             const int output_channel = m + in_channel * depth_multiplier;
+//             const int in_x_origin = (out_x * stride_width) - pad_width;
+//             const int in_y_origin = (out_y * stride_height) - pad_height;
+//             int32_t acc = 0;
+//             for (int filter_y = 0; filter_y < filter_shape.Dims(1);
+//                  ++filter_y) {
+//               for (int filter_x = 0; filter_x < filter_shape.Dims(2);
+//                    ++filter_x) {
+//                 const int in_x = in_x_origin + dilation_width_factor * filter_x;
+//                 const int in_y =
+//                     in_y_origin + dilation_height_factor * filter_y;
+//                 // Zero padding by omitting the areas outside the image.
+//                 const bool is_point_inside_image =
+//                     (in_x >= 0) && (in_x < input_shape.Dims(2)) &&
+//                     (in_y >= 0) && (in_y < input_shape.Dims(1));
+//                 if (is_point_inside_image) {
+//                   int32_t input_val = input_data[Offset(
+//                       input_shape, batch, in_y, in_x, in_channel)];
+//                   int32_t filter_val = filter_data[Offset(
+//                       filter_shape, 0, filter_y, filter_x, output_channel)];
+//                   // Accumulate with 32 bits accumulator.
+//                   // In the nudging process during model quantization, we force
+//                   // real value of 0.0 be represented by a quantized value. This
+//                   // guarantees that the input_offset is a int8_t, even though
+//                   // it is represented using int32_t. int32_t += int8_t *
+//                   // (int8_t - int8_t) so the highest value we can get from each
+//                   // accumulation is [-127, 127] * ([-128, 127] -
+//                   // [-128, 127]), which is [-32512, 32512]. log2(32512)
+//                   // = 14.98, which means we can accumulate at least 2^16
+//                   // multiplications without overflow. The accumulator is
+//                   // applied to a filter so the accumulation logic will hold as
+//                   // long as the filter size (filter_y * filter_x * in_channel)
+//                   // does not exceed 2^16, which is the case in all the models
+//                   // we have seen so far.
+//                   // TODO(b/174275578): Add a check to make sure the
+//                   // accumulator depth is smaller than 2^16.
+//                   acc += filter_val * (input_val + input_offset);
+//                 }
+//               }
+//             }
+//             if (bias_data) {
+//               acc += bias_data[output_channel];
+//             }
+//             acc = MultiplyByQuantizedMultiplier(
+//                 acc, output_multiplier[output_channel],
+//                 output_shift[output_channel]);
+//             acc += output_offset;
+//             acc = std::max(acc, output_activation_min);
+//             acc = std::min(acc, output_activation_max);
+
+//             const int out_offset =
+//                 Offset(output_shape, batch, out_y, out_x, output_channel);
+
+//             if (batch == 0 && out_y == 0 && out_x == 0 &&
+//                 in_channel == 0 && m == 0) {
+//               RawPutcD('['); RawPutcD('D'); RawPutcD('W'); RawPutcD('W'); RawPutcD(']');
+//               RawTagHexD('a', static_cast<uint32_t>(acc));
+//               RawTagHexD('p', static_cast<uint32_t>(
+//                                   reinterpret_cast<uintptr_t>(
+//                                       &output_data[out_offset])));
+//               RawNewlineD();
+//             }
+
+//             output_data[out_offset] = static_cast<int8_t>(acc);
+
+//             if (batch == 0 && out_y == 0 && out_x == 0 &&
+//                 in_channel == 0 && m == 0) {
+//               RawPutcD('['); RawPutcD('D'); RawPutcD('W'); RawPutcD('A'); RawPutcD(']');
+//               RawTagHexD('v', static_cast<uint32_t>(
+//                                   static_cast<uint8_t>(
+//                                       output_data[out_offset])));
+//               RawNewlineD();
+//             }
+
+//             // output_data[Offset(output_shape, batch, out_y, out_x,
+//             //                    output_channel)] = static_cast<int8_t>(acc);
+//           }
+//         }
+//       }
+//     }
+//   }
+// }
+
+// inline void DepthwiseConvPerChannel(
+//     const DepthwiseParams& params, const int32_t* output_multiplier,
+//     const int32_t* output_shift, const RuntimeShape& input_shape,
+//     const int8_t* input_data, const RuntimeShape& filter_shape,
+//     const int8_t* filter_data, const RuntimeShape& bias_shape,
+//     const int32_t* bias_data, const RuntimeShape& output_shape,
+//     int8_t* output_data) {
+//   // Get parameters.
+//   // TODO(b/141565753): Re-introduce ScopedProfilingLabel on Micro.
+//   const int stride_width = params.stride_width;
+//   const int stride_height = params.stride_height;
+//   const int dilation_width_factor = params.dilation_width_factor;
+//   const int dilation_height_factor = params.dilation_height_factor;
+//   const int pad_width = params.padding_values.width;
+//   const int pad_height = params.padding_values.height;
+//   const int depth_multiplier = params.depth_multiplier;
+//   const int32_t input_offset = params.input_offset;
+//   const int32_t output_offset = params.output_offset;
+//   const int32_t output_activation_min = params.quantized_activation_min;
+//   const int32_t output_activation_max = params.quantized_activation_max;
+
+//   // Check dimensions of the tensors.
+//   TFLITE_DCHECK_EQ(input_shape.DimensionsCount(), 4);
+//   TFLITE_DCHECK_EQ(filter_shape.DimensionsCount(), 4);
+//   TFLITE_DCHECK_EQ(output_shape.DimensionsCount(), 4);
+
+//   TFLITE_DCHECK_LE(output_activation_min, output_activation_max);
+//   const int batches = MatchingDim(input_shape, 0, output_shape, 0);
+//   const int output_depth = MatchingDim(filter_shape, 3, output_shape, 3);
+//   const int input_height = input_shape.Dims(1);
+//   const int input_width = input_shape.Dims(2);
+//   const int input_depth = input_shape.Dims(3);
+//   const int filter_height = filter_shape.Dims(1);
+//   const int filter_width = filter_shape.Dims(2);
+//   const int output_height = output_shape.Dims(1);
+//   const int output_width = output_shape.Dims(2);
+//   TFLITE_DCHECK_EQ(output_depth, input_shape.Dims(3) * depth_multiplier);
+//   TFLITE_DCHECK_EQ(bias_shape.FlatSize(), output_depth);
+
+//   // RawPutcD('['); RawPutcD('D'); RawPutcD('W'); RawPutcD('S'); RawPutcD(']');
+//   // RawTagHexD('b', static_cast<uint32_t>(batches));
+//   // RawTagHexD('h', static_cast<uint32_t>(input_height));
+//   // RawTagHexD('w', static_cast<uint32_t>(input_width));
+//   // RawTagHexD('c', static_cast<uint32_t>(input_depth));
+//   // RawTagHexD('f', static_cast<uint32_t>(filter_height));
+//   // RawTagHexD('g', static_cast<uint32_t>(filter_width));
+//   // RawTagHexD('m', static_cast<uint32_t>(depth_multiplier));
+//   // RawTagHexD('H', static_cast<uint32_t>(output_height));
+//   // RawTagHexD('W', static_cast<uint32_t>(output_width));
+//   // RawTagHexD('C', static_cast<uint32_t>(output_depth));
+//   // RawTagHexD('o', static_cast<uint32_t>(
+//   //                    reinterpret_cast<uintptr_t>(output_data)));
+//   // RawNewlineD();
+
+//   // RawPutcD('['); RawPutcD('D'); RawPutcD('S'); RawPutcD('I'); RawPutcD(']');
+//   // RawTagHexD('0', static_cast<uint32_t>(input_shape.Dims(0)));
+//   // RawTagHexD('1', static_cast<uint32_t>(input_shape.Dims(1)));
+//   // RawTagHexD('2', static_cast<uint32_t>(input_shape.Dims(2)));
+//   RawTagHexD('3', static_cast<uint32_t>(input_shape.Dims(3)));
+//   // RawNewlineD();
+
+//   // RawPutcD('['); RawPutcD('D'); RawPutcD('S'); RawPutcD('O'); RawPutcD(']');
+//   // RawTagHexD('0', static_cast<uint32_t>(output_shape.Dims(0)));
+//   // RawTagHexD('1', static_cast<uint32_t>(output_shape.Dims(1)));
+//   // RawTagHexD('2', static_cast<uint32_t>(output_shape.Dims(2)));
+//   RawTagHexD('3', static_cast<uint32_t>(output_shape.Dims(3)));
+//   // RawNewlineD();
+
+//   // RawPutcD('['); RawPutcD('D'); RawPutcD('S'); RawPutcD('F'); RawPutcD(']');
+//   // RawTagHexD('0', static_cast<uint32_t>(filter_shape.Dims(0)));
+//   // RawTagHexD('1', static_cast<uint32_t>(filter_shape.Dims(1)));
+//   // RawTagHexD('2', static_cast<uint32_t>(filter_shape.Dims(2)));
+//   RawTagHexD('3', static_cast<uint32_t>(filter_shape.Dims(3)));
+//   // RawNewlineD();
+
+//   for (int batch = 0; batch < MatchingDim(input_shape, 0, output_shape, 0);
+//        ++batch) {
+//     for (int out_y = 0; out_y < output_shape.Dims(1); ++out_y) {
+//       for (int out_x = 0; out_x < output_shape.Dims(2); ++out_x) {
+//         for (int in_channel = 0; in_channel < input_shape.Dims(3);
+//              ++in_channel) {
+//           for (int m = 0; m < depth_multiplier; ++m) {
+//             const int output_channel = m + in_channel * depth_multiplier;
+//             const int in_x_origin = (out_x * stride_width) - pad_width;
+//             const int in_y_origin = (out_y * stride_height) - pad_height;
+//             int32_t acc = 0;
+
+//             const bool dump_dw =
+//                 (batch == 0 && out_y == 0 && out_x == 0 &&
+//                  in_channel < 4 && m == 0);
+
+//             if (dump_dw) {
+//               // RawPutcD('['); RawPutcD('D'); RawPutcD('0'); RawPutcD(']');
+//               // RawTagHexD('c', static_cast<uint32_t>(in_channel));
+//               // RawTagHexD('m', static_cast<uint32_t>(m));
+//               // RawTagHexD('o', static_cast<uint32_t>(output_channel));
+//               // RawTagHexD('x', static_cast<uint32_t>(out_x));
+//               RawTagHexD('y', static_cast<uint32_t>(out_y));
+//               // RawTagHexD('a', static_cast<uint32_t>(acc));
+//               // RawNewlineD();
+//             }
+
+//             for (int filter_y = 0; filter_y < filter_shape.Dims(1);
+//                  ++filter_y) {
+//               for (int filter_x = 0; filter_x < filter_shape.Dims(2);
+//                    ++filter_x) {
+//                 const int in_x = in_x_origin + dilation_width_factor * filter_x;
+//                 const int in_y =
+//                     in_y_origin + dilation_height_factor * filter_y;
+
+//                 // Zero padding by omitting the areas outside the image.
+//                 const bool is_point_inside_image =
+//                     (in_x >= 0) && (in_x < input_shape.Dims(2)) &&
+//                     (in_y >= 0) && (in_y < input_shape.Dims(1));
+
+//                 if (is_point_inside_image) {
+//                   const int input_offset_index =
+//                       Offset(input_shape, batch, in_y, in_x, in_channel);
+//                   const int filter_offset_index =
+//                       Offset(filter_shape, 0, filter_y, filter_x,
+//                              output_channel);
+
+//                   int32_t input_val = input_data[input_offset_index];
+//                   int32_t filter_val = filter_data[filter_offset_index];
+
+//                   const int32_t input_plus_offset = input_val + input_offset;
+//                   const int32_t product = filter_val * input_plus_offset;
+
+//                   acc += product;
+
+//                   if (dump_dw) {
+//                     // RawPutcD('['); RawPutcD('D'); RawPutcD('1'); RawPutcD(']');
+//                     // RawTagHexD('c', static_cast<uint32_t>(in_channel));
+//                     // RawTagHexD('f', static_cast<uint32_t>(filter_y));
+//                     // RawTagHexD('g', static_cast<uint32_t>(filter_x));
+//                     // RawTagHexD('y', static_cast<uint32_t>(in_y));
+//                     // RawTagHexD('x', static_cast<uint32_t>(in_x));
+//                     // RawTagHexD('I', static_cast<uint32_t>(input_offset_index));
+//                     // RawTagHexD('F', static_cast<uint32_t>(filter_offset_index));
+//                     RawTagHexD('i', static_cast<uint32_t>(input_val));
+//                     // RawTagHexD('w', static_cast<uint32_t>(filter_val));
+//                     // RawTagHexD('z', static_cast<uint32_t>(input_offset));
+//                     // RawTagHexD('p', static_cast<uint32_t>(product));
+//                     // RawTagHexD('a', static_cast<uint32_t>(acc));
+//                     // RawNewlineD();
+//                   }
+//                 } else {
+//                   if (dump_dw) {
+//                     // RawPutcD('['); RawPutcD('D'); RawPutcD('P'); RawPutcD(']');
+//                     // RawTagHexD('c', static_cast<uint32_t>(in_channel));
+//                     // RawTagHexD('f', static_cast<uint32_t>(filter_y));
+//                     RawTagHexD('g', static_cast<uint32_t>(filter_x));
+//                     // RawTagHexD('y', static_cast<uint32_t>(in_y));
+//                     // RawTagHexD('x', static_cast<uint32_t>(in_x));
+//                     // RawNewlineD();
+//                   }
+//                 }
+//               }
+//             }
+
+//             if (dump_dw) {
+//               // RawPutcD('['); RawPutcD('D'); RawPutcD('2'); RawPutcD(']');
+//               // RawTagHexD('c', static_cast<uint32_t>(in_channel));
+//               // RawTagHexD('a', static_cast<uint32_t>(acc));
+//               // RawNewlineD();
+//             }
+
+//             if (bias_data) {
+//               const int32_t bias = bias_data[output_channel];
+
+//               if (dump_dw) {
+//                 // RawPutcD('['); RawPutcD('D'); RawPutcD('3'); RawPutcD(']');
+//                 // RawTagHexD('c', static_cast<uint32_t>(in_channel));
+//                 // RawTagHexD('b', static_cast<uint32_t>(bias));
+//                 // RawTagHexD('a', static_cast<uint32_t>(acc));
+//                 // RawNewlineD();
+//               }
+
+//               acc += bias;
+
+//               if (dump_dw) {
+//                 // RawPutcD('['); RawPutcD('D'); RawPutcD('4'); RawPutcD(']');
+//                 // RawTagHexD('c', static_cast<uint32_t>(in_channel));
+//                 // RawTagHexD('a', static_cast<uint32_t>(acc));
+//                 // RawNewlineD();
+//               }
+//             }
+
+//             const int32_t mult = output_multiplier[output_channel];
+//             const int32_t shift = output_shift[output_channel];
+
+//             if (dump_dw) {
+//               // RawPutcD('['); RawPutcD('D'); RawPutcD('5'); RawPutcD(']');
+//               // RawTagHexD('c', static_cast<uint32_t>(in_channel));
+//               // RawTagHexD('a', static_cast<uint32_t>(acc));
+//               // RawTagHexD('m', static_cast<uint32_t>(mult));
+//               // RawTagHexD('s', static_cast<uint32_t>(shift));
+//               // RawNewlineD();
+//             }
+
+//             acc = MultiplyByQuantizedMultiplier(acc, mult, shift);
+
+//             if (dump_dw) {
+//               // RawPutcD('['); RawPutcD('D'); RawPutcD('6'); RawPutcD(']');
+//               // RawTagHexD('c', static_cast<uint32_t>(in_channel));
+//               // RawTagHexD('a', static_cast<uint32_t>(acc));
+//               // RawTagHexD('o', static_cast<uint32_t>(output_offset));
+//               // RawNewlineD();
+//             }
+
+//             acc += output_offset;
+
+//             if (dump_dw) {
+//               // RawPutcD('['); RawPutcD('D'); RawPutcD('7'); RawPutcD(']');
+//               // RawTagHexD('c', static_cast<uint32_t>(in_channel));
+//               // RawTagHexD('a', static_cast<uint32_t>(acc));
+//               // RawTagHexD('n', static_cast<uint32_t>(output_activation_min));
+//               // RawTagHexD('x', static_cast<uint32_t>(output_activation_max));
+//               // RawNewlineD();
+//             }
+
+//             acc = std::max(acc, output_activation_min);
+//             acc = std::min(acc, output_activation_max);
+
+//             if (dump_dw) {
+//               // RawPutcD('['); RawPutcD('D'); RawPutcD('8'); RawPutcD(']');
+//               // RawTagHexD('c', static_cast<uint32_t>(in_channel));
+//               // RawTagHexD('a', static_cast<uint32_t>(acc));
+//               // RawNewlineD();
+//             }
+
+//             const int out_offset =
+//                 Offset(output_shape, batch, out_y, out_x, output_channel);
+
+//             if (batch == 0 && out_y == 0 && out_x == 0 &&
+//                 in_channel == 0 && m == 0) {
+//               // RawPutcD('['); RawPutcD('D'); RawPutcD('W'); RawPutcD('W'); RawPutcD(']');
+//               // RawTagHexD('a', static_cast<uint32_t>(acc));
+//               // RawTagHexD('p', static_cast<uint32_t>(
+//               //                     reinterpret_cast<uintptr_t>(
+//               //                         &output_data[out_offset])));
+//               // RawNewlineD();
+//             }
+
+//             output_data[out_offset] = static_cast<int8_t>(acc);
+
+//             if (batch == 0 && out_y == 0 && out_x == 0 &&
+//                 in_channel == 0 && m == 0) {
+//               // RawPutcD('['); RawPutcD('D'); RawPutcD('W'); RawPutcD('A'); RawPutcD(']');
+//               // RawTagHexD('v', static_cast<uint32_t>(
+//               //                     static_cast<uint8_t>(
+//               //                         output_data[out_offset])));
+//               // RawNewlineD();
+//             }
+//           }
+//         }
+//       }
+//     }
+//   }
+// }
+
+
 
 inline void DepthwiseConvPerChannel(
     const DepthwiseParams& params, const int32_t* output_mult,
@@ -132,6 +663,24 @@ inline void DepthwiseConvPerChannel(
     const int input_shape[] = {i_shape.Dims(0), i_shape.Dims(1), i_shape.Dims(2), i_shape.Dims(3)};
     const int kernel_shape[] = {w_shape.Dims(0), w_shape.Dims(1), w_shape.Dims(2), w_shape.Dims(3)};
     const int output_shape[] = {o_shape.Dims(0), o_shape.Dims(1), o_shape.Dims(2), o_shape.Dims(3)};
+    
+    //SPAD Size (precalculated)
+    int plm_in=8192;
+    int plm_w=8192;
+    int plm_out=8192;
+
+    //Unknowns
+    int tile_shape[4]; //input tile
+    int w_tile_shape[4]; //weight tile
+    int o_tile_shape[4]; //output tile
+    int tile_number; //how many tiles there are
+    int height_number; //how many parts height is divided into
+    int width_number; //how many parts width is divided into
+    int channel_number; //how many parts channel is divided into
+    int batch_number; //how many batches
+    int systolic_size[]={8, 8};
+    int overlap_h=kernel_shape[1]-stride_h;
+    int overlap_w=kernel_shape[2]-stride_w;
 
     const int pad_height = (output_shape[1]*stride_h)+overlap_h-input_shape[1];
     const int pad_width = (output_shape[1]*stride_h)+overlap_h-input_shape[1];
@@ -156,24 +705,6 @@ inline void DepthwiseConvPerChannel(
         padding_left=pad_width/2;
         padding_right=pad_width/2+1;
     }
-    
-    //SPAD Size (precalculated)
-    int plm_in=8192;
-    int plm_w=8192;
-    int plm_out=8192;
-
-    //Unknowns
-    int tile_shape[4]; //input tile
-    int w_tile_shape[4]; //weight tile
-    int o_tile_shape[4]; //output tile
-    int tile_number; //how many tiles there are
-    int height_number; //how many parts height is divided into
-    int width_number; //how many parts width is divided into
-    int channel_number; //how many parts channel is divided into
-    int batch_number; //how many batches
-    int systolic_size[]={8, 8};
-    int overlap_h=kernel_shape[1]-stride_h;
-    int overlap_w=kernel_shape[2]-stride_w;
 
     int padded_input_shape[] = {input_shape[0], input_shape[1]+padding_up+padding_down, input_shape[2]+padding_left+padding_right, input_shape[3]};
 
@@ -360,7 +891,8 @@ inline void DepthwiseConvPerChannel(
                         }
                     }
                 }
-                else{
+            }
+            else{
                 for(int height=0; height<kernel_shape[1]; height++){
                     for(int width=0; width<kernel_shape[2]; width++){
                         for(int channel=0; channel<w_tile_shape[3]; channel++){
@@ -369,7 +901,7 @@ inline void DepthwiseConvPerChannel(
                     }
                 }
             }
-            }
+            
 
             //input tiling
             for(int height=0; height<std::min(tile_shape[1], height_count); height++){
@@ -380,7 +912,6 @@ inline void DepthwiseConvPerChannel(
                         int height_off=0;
                         int width_off=0;
                         int channel_off=(real_tile/(tile_shape[1]*tile_shape[2]))*tile_shape[3];
-                        int pixel;
                         if(tile>=height_number){
                             height_off=(((tile)/height_number))*(tile_shape[1]-overlap_h);
                         }
@@ -501,8 +1032,8 @@ inline void DepthwiseConvPerChannel(
                                 (in_y < input_height);
                             if (is_point_inside_image) {
                             
-                            int32_t input_val = input_data[((batch * input_height + in_y) * input_width + in_x) * input_depth + in_channel];
-                            int32_t filter_val = filter_data[((0 * filter_height + filter_y) * filter_width + filter_x) * w_tile_shape[3] + output_channel];
+                            int32_t input_val = tile_data[((batch * input_height + in_y) * input_width + in_x) * input_depth + in_channel];
+                            int32_t filter_val = w_tile_data[((0 * filter_height + filter_y) * filter_width + filter_x) * w_tile_shape[3] + output_channel];
                             acc += filter_val * (input_val + input_offset);
                             }
                         }
@@ -516,7 +1047,8 @@ inline void DepthwiseConvPerChannel(
                         acc += output_off;
                         acc = std::max(acc, output_activation_min);
                         acc = std::min(acc, output_activation_max);
-                        o_tile_data[Offset(((batch * output_height + out_y) * output_width + out_x) * output_depth + output_channel)] = static_cast<int8_t>(acc);
+                        o_tile_data[(((batch * output_height + out_y) * output_width + out_x) * output_depth + output_channel)] = static_cast<int8_t>(acc);
+                        //
                     }
                     }
                 }
@@ -577,5 +1109,172 @@ inline void DepthwiseConvPerChannel(
         }
     }
 }
+
+inline void DepthwiseConvPerChannel(
+    const DepthwiseParams& params, const int32_t* output_multiplier,
+    const int32_t* output_shift, const RuntimeShape& input_shape,
+    const int16_t* input_data, const RuntimeShape& filter_shape,
+    const int8_t* filter_data, const RuntimeShape& bias_shape,
+    const std::int64_t* bias_data, const RuntimeShape& output_shape,
+    int16_t* output_data) {
+  // Get parameters.
+  const int stride_width = params.stride_width;
+  const int stride_height = params.stride_height;
+  const int dilation_width_factor = params.dilation_width_factor;
+  const int dilation_height_factor = params.dilation_height_factor;
+  const int pad_width = params.padding_values.width;
+  const int pad_height = params.padding_values.height;
+  const int depth_multiplier = params.depth_multiplier;
+  const int32_t output_activation_min = params.quantized_activation_min;
+  const int32_t output_activation_max = params.quantized_activation_max;
+
+  // Check dimensions of the tensors.
+  TFLITE_DCHECK_EQ(input_shape.DimensionsCount(), 4);
+  TFLITE_DCHECK_EQ(filter_shape.DimensionsCount(), 4);
+  TFLITE_DCHECK_EQ(output_shape.DimensionsCount(), 4);
+
+  TFLITE_DCHECK_LE(output_activation_min, output_activation_max);
+  const int batches = MatchingDim(input_shape, 0, output_shape, 0);
+  const int output_depth = MatchingDim(filter_shape, 3, output_shape, 3);
+  const int input_height = input_shape.Dims(1);
+  const int input_width = input_shape.Dims(2);
+  const int input_depth = input_shape.Dims(3);
+  const int filter_height = filter_shape.Dims(1);
+  const int filter_width = filter_shape.Dims(2);
+  const int output_height = output_shape.Dims(1);
+  const int output_width = output_shape.Dims(2);
+  TFLITE_DCHECK_EQ(output_depth, input_depth * depth_multiplier);
+  TFLITE_DCHECK_EQ(bias_shape.FlatSize(), output_depth);
+
+  for (int batch = 0; batch < batches; ++batch) {
+    for (int out_y = 0; out_y < output_height; ++out_y) {
+      for (int out_x = 0; out_x < output_width; ++out_x) {
+        for (int in_channel = 0; in_channel < input_depth; ++in_channel) {
+          for (int m = 0; m < depth_multiplier; ++m) {
+            const int output_channel = m + in_channel * depth_multiplier;
+            const int in_x_origin = (out_x * stride_width) - pad_width;
+            const int in_y_origin = (out_y * stride_height) - pad_height;
+            std::int64_t acc = 0;
+            for (int filter_y = 0; filter_y < filter_height; ++filter_y) {
+              for (int filter_x = 0; filter_x < filter_width; ++filter_x) {
+                const int in_x = in_x_origin + dilation_width_factor * filter_x;
+                const int in_y =
+                    in_y_origin + dilation_height_factor * filter_y;
+                // Zero padding by omitting the areas outside the image.
+                const bool is_point_inside_image =
+                    (in_x >= 0) && (in_x < input_width) && (in_y >= 0) &&
+                    (in_y < input_height);
+                if (is_point_inside_image) {
+                  int32_t input_val = input_data[Offset(
+                      input_shape, batch, in_y, in_x, in_channel)];
+                  int32_t filter_val = filter_data[Offset(
+                      filter_shape, 0, filter_y, filter_x, output_channel)];
+                  // Accumulate with 64 bits accumulator.
+                  // We assume maximum of 2^16 accumulations as with the 8-bit
+                  // case so actually the value in the accumulator should not
+                  // exceed 40 bits
+                  acc += static_cast<int64_t>(filter_val) *
+                         static_cast<int64_t>(input_val);
+                }
+              }
+            }
+            if (bias_data) {
+              acc += bias_data[output_channel];
+            }
+            int32_t scaled_acc = MultiplyByQuantizedMultiplier(
+                acc, output_multiplier[output_channel],
+                output_shift[output_channel]);
+            scaled_acc = std::max(scaled_acc, output_activation_min);
+            scaled_acc = std::min(scaled_acc, output_activation_max);
+            output_data[Offset(output_shape, batch, out_y, out_x,
+                               output_channel)] =
+                static_cast<int16_t>(scaled_acc);
+          }
+        }
+      }
+    }
+  }
 }
+
+inline void DepthwiseConvHybridPerChannel(
+    const DepthwiseParams& params, float* scaling_factors_ptr,
+    const RuntimeShape& input_shape, const int8_t* input_data,
+    const RuntimeShape& filter_shape, const int8_t* filter_data,
+    const RuntimeShape& bias_shape, const float* bias_data,
+    const RuntimeShape& output_shape, float* output_data,
+    const float* per_channel_scale, int32_t* input_offset) {
+  const int stride_width = params.stride_width;
+  const int stride_height = params.stride_height;
+  const int dilation_width_factor = params.dilation_width_factor;
+  const int dilation_height_factor = params.dilation_height_factor;
+  const int pad_width = params.padding_values.width;
+  const int pad_height = params.padding_values.height;
+  const int depth_multiplier = params.depth_multiplier;
+  const float output_activation_min = params.float_activation_min;
+  const float output_activation_max = params.float_activation_max;
+  // Check dimensions of the tensors.
+  TFLITE_DCHECK_EQ(input_shape.DimensionsCount(), 4);
+  TFLITE_DCHECK_EQ(filter_shape.DimensionsCount(), 4);
+  TFLITE_DCHECK_EQ(output_shape.DimensionsCount(), 4);
+
+  const int batches = MatchingDim(input_shape, 0, output_shape, 0);
+  const int output_depth = MatchingDim(filter_shape, 3, output_shape, 3);
+  const int input_height = input_shape.Dims(1);
+  const int input_width = input_shape.Dims(2);
+  const int input_depth = input_shape.Dims(3);
+  const int filter_height = filter_shape.Dims(1);
+  const int filter_width = filter_shape.Dims(2);
+  const int output_height = output_shape.Dims(1);
+  const int output_width = output_shape.Dims(2);
+  const int bias_depth = bias_shape.FlatSize();
+  TFLITE_DCHECK_EQ(output_depth, input_depth * depth_multiplier);
+  TFLITE_DCHECK_EQ(bias_depth, output_depth);
+
+  for (int batch = 0; batch < batches; ++batch) {
+    for (int out_y = 0; out_y < output_height; ++out_y) {
+      for (int out_x = 0; out_x < output_width; ++out_x) {
+        for (int in_channel = 0; in_channel < input_depth; ++in_channel) {
+          for (int m = 0; m < depth_multiplier; ++m) {
+            const int output_channel = m + in_channel * depth_multiplier;
+            const int in_x_origin = (out_x * stride_width) - pad_width;
+            const int in_y_origin = (out_y * stride_height) - pad_height;
+            int32_t acc = 0;
+            for (int filter_y = 0; filter_y < filter_height; ++filter_y) {
+              for (int filter_x = 0; filter_x < filter_width; ++filter_x) {
+                const int in_x = in_x_origin + dilation_width_factor * filter_x;
+                const int in_y =
+                    in_y_origin + dilation_height_factor * filter_y;
+                // Zero padding by omitting the areas outside the image.
+                const bool is_point_inside_image =
+                    (in_x >= 0) && (in_x < input_width) && (in_y >= 0) &&
+                    (in_y < input_height);
+                if (is_point_inside_image) {
+                  int32_t input_val = input_data[Offset(
+                      input_shape, batch, in_y, in_x, in_channel)];
+                  int32_t filter_val = filter_data[Offset(
+                      filter_shape, 0, filter_y, filter_x, output_channel)];
+                  acc += filter_val * (input_val - input_offset[batch]);
+                }
+              }
+            }
+            float acc_float = static_cast<float>(acc);
+            acc_float *=
+                per_channel_scale[output_channel] * scaling_factors_ptr[batch];
+            if (bias_data && output_channel < bias_depth) {
+              acc_float += bias_data[output_channel];
+            }
+            output_data[Offset(output_shape, batch, out_y, out_x,
+                               output_channel)] =
+                ActivationFunctionWithMinMax(acc_float, output_activation_min,
+                                             output_activation_max);
+          }
+        }
+      }
+    }
+  }
 }
+
+}  // namespace reference_integer_ops
+}  // namespace tflite
+
+#endif  // TENSORFLOW_LITE_KERNELS_INTERNAL_REFERENCE_INTEGER_OPS_DEPTHWISE_CONV_H_
